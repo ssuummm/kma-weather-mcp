@@ -16,6 +16,10 @@ class Settings:
     nominatim_url: str
     # 원격 접속 보호용 Bearer 토큰. 비워두면 인증 없이 열립니다.
     mcp_auth_token: str
+    ########
+    # 툴 인가용 OPA API 주소. 비워두면 하드코딩된 허용 목록(MOCK_RESPONSE)을 사용합니다.
+    opa_url: str
+    ########
     host: str
     port: int
     path: str
@@ -29,6 +33,9 @@ class Settings:
             airkorea_service_key=os.getenv("AIRKOREA_SERVICE_KEY", "").strip() or kma_key,
             nominatim_url=os.getenv("NOMINATIM_URL", "https://nominatim.openstreetmap.org").strip().rstrip("/"),
             mcp_auth_token=os.getenv("MCP_AUTH_TOKEN", "").strip(),
+            ########
+            opa_url=os.getenv("OPA_URL", "").strip(),
+            ########
             host=os.getenv("HOST", "0.0.0.0"),
             port=int(os.getenv("PORT", "8000")),
             path=os.getenv("MCP_PATH", "/mcp"),

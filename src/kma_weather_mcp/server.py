@@ -9,6 +9,13 @@ from typing import Annotated, Any, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+########
+import httpx
+import mcp_types as mt
+from fastmcp.server.dependencies import get_access_token
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
+from fastmcp.tools import ToolResult
+########
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -47,6 +54,59 @@ def clients() -> WeatherClients:
     if _clients is None:
         _clients = WeatherClients(settings)
     return _clients
+
+
+########
+# ------------------------------------------------------------ OPA 툴 인가
+class OpaAuthorizationMiddleware(Middleware):
+    """툴 호출마다 OPA API에 허용 툴 목록을 물어보고, 목록에 없으면 실행하지 않는다.
+
+    OPA 응답 형식: {"allowed_tool_list": ["toola", "toolb"]}
+    """
+
+    # OPA API가 준비되기 전까지 쓰는 고정 응답 (OPA_URL이 비어 있을 때)
+    MOCK_RESPONSE = {"allowed_tool_list": ["search_location", "get_current_weather"]}
+
+    def __init__(self, opa_url: str, timeout: float = 5.0) -> None:
+        self.opa_url = opa_url
+        self.timeout = timeout
+
+    async def _allowed_tools(self, subject: str, tool: str) -> list[str]:
+        if not self.opa_url:
+            return list(self.MOCK_RESPONSE["allowed_tool_list"])
+        async with httpx.AsyncClient(timeout=self.timeout) as http:
+            r = await http.post(self.opa_url, json={"input": {"subject": subject, "tool": tool}})
+            r.raise_for_status()
+            allowed = r.json().get("allowed_tool_list") or []
+        return [str(t) for t in allowed]
+
+    @staticmethod
+    def _denied(message: str) -> ToolResult:
+        # is_error=True → MCP CallToolResult(isError=true, content=[TextContent])
+        return ToolResult(content=message, is_error=True)
+
+    async def on_call_tool(
+        self,
+        context: MiddlewareContext[mt.CallToolRequestParams],
+        call_next: CallNext[mt.CallToolRequestParams, ToolResult],
+    ) -> ToolResult:
+        tool = context.message.name
+        token = get_access_token()
+        subject = token.client_id if token else "anonymous"
+
+        try:
+            allowed = await self._allowed_tools(subject, tool)
+        except (httpx.HTTPError, ValueError):
+            # 인가 서버 장애 시에는 거부 (fail-closed)
+            return self._denied(f"권한 확인 서버에 연결하지 못해 '{tool}' 툴을 실행할 수 없습니다.")
+
+        if tool not in allowed:
+            return self._denied(f"'{tool}' 툴을 호출할 권한이 없습니다.")
+        return await call_next(context)
+
+
+mcp.add_middleware(OpaAuthorizationMiddleware(settings.opa_url, timeout=settings.http_timeout))
+########
 
 
 READ_ONLY = {"read_only_hint": True, "open_world_hint": True, "idempotent_hint": True}

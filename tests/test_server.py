@@ -54,6 +54,21 @@ def fresh_clients():
     server._clients = None
 
 
+########
+# server import 시점에 add_middleware로 등록된 인가 미들웨어 (픽스처가 걷어내기 전)
+GLOBAL_OPA = [m for m in server.mcp.middleware if isinstance(m, server.OpaAuthorizationMiddleware)]
+
+
+@pytest.fixture(autouse=True)
+def no_global_opa():
+    """기본 테스트는 인가 없이 툴 자체를 검증한다. 인가 테스트는 미들웨어를 직접 붙인다."""
+    saved = list(server.mcp.middleware)
+    server.mcp.middleware[:] = [m for m in saved if not isinstance(m, server.OpaAuthorizationMiddleware)]
+    yield
+    server.mcp.middleware[:] = saved
+########
+
+
 @pytest.fixture
 def mocked():
     with respx.mock(assert_all_called=False) as m:
@@ -184,3 +199,69 @@ async def test_invalid_service_key_xml(mocked):
     async with Client(server.mcp) as c:
         with pytest.raises(ToolError, match="인증키 오류"):
             await c.call_tool("get_weather_alerts", {})
+
+
+########
+# ------------------------------------------------------------ OPA 툴 인가
+OPA_URL = "https://opa.example.com/v1/data/mcp/authz"
+
+
+@pytest.fixture
+def opa_middleware():
+    mw = server.OpaAuthorizationMiddleware(OPA_URL)
+    server.mcp.add_middleware(mw)
+    yield
+    server.mcp.middleware.remove(mw)
+
+
+@pytest.fixture
+def mock_opa_middleware():
+    mw = server.OpaAuthorizationMiddleware("")  # OPA_URL 미설정 → 하드코딩 응답
+    server.mcp.add_middleware(mw)
+    yield
+    server.mcp.middleware.remove(mw)
+
+
+def test_middleware_registered_globally():
+    assert len(GLOBAL_OPA) == 1 and GLOBAL_OPA[0].opa_url == ""
+
+
+async def test_mock_opa_allows_and_denies(mocked, mock_opa_middleware):
+    r = await call("get_current_weather", lat=37.2, lon=127.07)
+    assert r["temperature_c"] == 14.2
+    r = await call("search_location", query="화성")
+    assert r["count"] == 2
+    async with Client(server.mcp) as c:
+        for tool, args in [("get_forecast", {"lat": 37.2, "lon": 127.07}),
+                           ("get_air_quality", {"lat": 37.2, "lon": 127.07}),
+                           ("get_weather_alerts", {})]:
+            res = await c.call_tool(tool, args, raise_on_error=False)
+            assert res.is_error is True
+            assert res.content[0].text == f"'{tool}' 툴을 호출할 권한이 없습니다."
+
+
+async def test_opa_allows_listed_tool(mocked, opa_middleware):
+    route = mocked.post(OPA_URL).respond(json={"allowed_tool_list": ["get_weather_alerts", "search_location"]})
+    r = await call("get_weather_alerts", region="강원도")
+    assert r["active"][0]["warning"] == "건조주의보"
+    sent = json.loads(route.calls.last.request.content)
+    assert sent["input"]["tool"] == "get_weather_alerts"
+
+
+async def test_opa_denies_unlisted_tool(mocked, opa_middleware):
+    mocked.post(OPA_URL).respond(json={"allowed_tool_list": ["search_location"]})
+    weather = mocked.get(f"{KMA_FCST}/getUltraSrtNcst")
+    async with Client(server.mcp) as c:
+        res = await c.call_tool("get_current_weather", {"lat": 37.2, "lon": 127.07}, raise_on_error=False)
+    assert res.is_error is True
+    assert "권한이 없습니다" in res.content[0].text
+    assert not weather.called  # 툴 본문이 실행되지 않아야 함
+
+
+async def test_opa_unreachable_denies(mocked, opa_middleware):
+    mocked.post(OPA_URL).mock(side_effect=httpx.ConnectError("down"))
+    async with Client(server.mcp) as c:
+        res = await c.call_tool("get_weather_alerts", {}, raise_on_error=False)
+    assert res.is_error is True
+    assert "권한 확인 서버" in res.content[0].text
+########
