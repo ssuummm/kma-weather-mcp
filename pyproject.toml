@@ -1,0 +1,28 @@
+[project]
+name = "kma-weather-mcp"
+version = "0.1.0"
+description = "기상청·에어코리아 기반 국내 날씨 MCP 서버 (FastMCP, Streamable HTTP)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=4.1,<5",
+    "httpx>=0.27",
+    "pyproj>=3.6",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "respx>=0.21"]
+
+[project.scripts]
+kma-weather-mcp = "kma_weather_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/kma_weather_mcp"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+pythonpath = ["src"]
